@@ -19,10 +19,10 @@
 1. 创建 `pyproject.toml`、`README.md`、`.env.example` 和包初始化文件。
    预期结果：项目能够被 Python 解释器识别，文档说明离线运行命令和 API 配置项。
 
-2. 编写 `tests/test_model.py` 的失败测试。
+2. 编写 `tests/test_agent.py` 和 `tests/test_cli.py` 的失败测试。
    预期结果：测试表达 Mock 模型返回确定性回答、Runtime 使用模型客户端，以及 API 客户端解析文本回答。
 
-3. 运行 `python -m unittest discover -s tests -v`。
+3. 运行 `PYTHONPATH=src python3 -m unittest discover -s tests -v`。
    预期结果：测试因目标模块和类尚不存在而失败，不能是测试代码语法错误。
 
 4. 实现 `model.py` 中的消息类型、模型客户端协议和响应类型。
@@ -35,10 +35,10 @@
    预期结果：客户端拼接基础 URL，发送 JSON 请求，验证 HTTP 状态和响应结构，并提取首个 choice 的 message content。
 
 7. 实现 `runtime.py` 和 `cli.py`。
-   预期结果：没有 `MODEL_API_KEY` 时使用 Mock；存在完整 API 配置时使用真实客户端；配置不完整时给出明确错误。
+   预期结果：三个模型环境变量全部缺失时使用 Mock；存在完整 API 配置时使用真实客户端；配置不完整、为空或 URL 非法时给出明确错误。
 
-8. 运行单元测试和离线 CLI 实验。
-   预期结果：所有测试通过，CLI 能在无网络和无密钥状态下返回回答。
+8. 运行 `PYTHONPATH=src python3 -m unittest discover -s tests -v` 和 `printf 'What is an agent?\n' | PYTHONPATH=src python3 -m agent_course`。
+   预期结果：11 个测试通过，CLI 能在无网络和无密钥状态下返回回答。
 
 9. 更新 `docs/teaching-log.md`。
    预期结果：记录第一课的概念、目录、测试过程、实际命令输出和下一课问题。
