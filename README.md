@@ -13,6 +13,23 @@
 - `MockModel` 让项目无需网络即可运行
 - `OpenAICompatibleModel` 调用 `/v1/chat/completions`
 
+## 第二课：工具契约与注册表
+
+第二课新增：
+
+- `ToolDefinition` 描述工具名称、用途、参数和执行器
+- `ToolRegistry` 管理工具白名单、参数校验和执行结果
+- 当前参数 schema 只接受顶层 `object` 和属性 `string`、`number`、`boolean`
+- `lookup_topic` 提供一个完全离线的课程知识查询工具
+
+当前可以直接运行工具实验：
+
+```bash
+PYTHONPATH=src python3 -c 'from agent_course.course_tools import build_course_registry; print(build_course_registry().execute("lookup_topic", {"topic": "Agent"}))'
+```
+
+模型自动选择工具和 Agent 工具循环将在后续课程接入。
+
 运行测试：
 
 ```bash

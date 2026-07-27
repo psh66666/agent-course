@@ -5,6 +5,7 @@
 - 项目目录：`/Users/rm001/agent-course`
 - 技术路线：Python + OpenAI 兼容 API + 离线 Mock 模式
 - 教学方式：每节课先理解概念，再做一个小改动，并用测试或实验验证
+- 提交方式：课堂过程先保存在本地，一节课结束后再统一提交并推送 GitHub
 - 当前阶段：第一课
 
 ## 第一课：模型调用与 Agent Runtime
@@ -343,6 +344,112 @@ result      标准化结果或错误
 还要注意：schema 只能约束格式，不能保证模型选择了正确工具，也不能保证参数符合所有业务规则。即使 JSON 结构合法，Runtime 仍需要检查工具白名单、权限和业务约束；必要时可以拒绝、重试或请求用户确认。
 
 当前项目的 OpenAI 兼容客户端还没有把工具 schema 发送给模型，下一步会先实现本地 `ToolDefinition` 和 `ToolRegistry`，再把工具调用接入模型循环。
+
+### 课堂问答：模型请求未知工具时如何处理
+
+#### 教师问题
+
+如果模型传来的参数格式完全合法，但工具名称是系统中不存在的工具，Runtime 应该怎么处理？
+
+#### 学生回答
+
+“需要给出找不到对应工具的回答，要求模型重新选择工具。”
+
+#### 教师补充
+
+方向正确，但错误处理应该分两层：Runtime 先生成结构化的 `tool_not_found` 错误，并把错误结果返回给模型，让模型在上下文中重新选择；Runtime 同时递增重试次数并设置上限。如果模型反复请求未知工具，程序应该停止循环并返回明确错误，或升级给用户/人工处理，不能无限重试。
+
+```text
+未知工具
+  -> Runtime 拒绝执行
+  -> 返回结构化错误给模型
+  -> 有界重试
+  -> 仍失败则结束或升级
+```
+
+### 课堂问答：为什么需要 `ToolRegistry`
+
+#### 教师问题
+
+为什么要设计 `ToolRegistry`，而不是直接在 `AgentRuntime` 里写很多个 `if tool_name == ...`？
+
+#### 学生回答
+
+“这样会导致添加新的工具困难，同时还需要在主循环里不断判断是否调用了每个工具。”
+
+#### 教师确认
+
+回答正确。把工具判断全部写进主循环会让编排逻辑和业务能力耦合，工具越多，主循环越难阅读、测试和修改。注册表把工具名称映射到工具定义和 handler，Runtime 只负责统一的查找、校验、执行和错误处理。
+
+这体现了一个重要架构原则：新增一个工具应该主要新增工具定义和注册动作，而不是修改已经稳定的主循环。
+
+## 第二课设计：第一个本地工具
+
+### 选择的工具
+
+实现一个无网络的 `lookup_topic` 工具，从固定的课程知识字典中查询概念。它没有文件写入、Shell 或外部网络能力，适合第一次学习工具调用。
+
+### 计划中的组件
+
+```text
+ToolDefinition
+  - name
+  - description
+  - parameters schema
+  - handler
+
+ToolRegistry
+  - register
+  - get
+  - execute
+```
+
+### 第一条实现边界
+
+先实现工具定义、注册、未知工具错误和参数校验，不立即接入真实模型。先让 Python 测试直接验证工具契约，再把它接入 Agent Runtime 循环。
+
+### 过程 4：TDD 实现结果
+
+#### 红灯阶段
+
+先添加 `tests/test_tools.py`，测试正常调用、未知工具、缺少参数、错误类型和重复注册。生产模块尚不存在时，测试因无法导入 `course_tools` 而失败，确认测试确实覆盖了待实现能力。
+
+#### 绿灯阶段
+
+新增：
+
+- `tools.py`：定义 `ToolDefinition`、`ToolResult` 和 `ToolRegistry`
+- `course_tools.py`：定义课程知识字典、`lookup_topic` handler 和默认注册表
+
+`ToolRegistry.execute()` 统一返回 `ToolResult`。未知工具和非法参数不会直接让程序崩溃，而是返回错误码和可交给模型的错误内容。
+
+#### 实验结果
+
+```text
+ToolResult(ok=True, content='Agent 是由模型、Runtime、状态、工具和控制规则组成的系统。', error_code=None)
+ToolResult(ok=False, content="No tool named 'unknown' is registered.", error_code='tool_not_found')
+ToolResult(ok=False, content='Missing required argument: topic.', error_code='invalid_arguments')
+```
+
+`PYTHONPATH=src python3 -m unittest discover -s tests -v` 当前返回 `Ran 23 tests` 和 `OK`。本节新增的 12 个测试只验证工具层，尚未把模型输出接入工具循环。
+
+### 过程 5：当前代码边界
+
+当前可以由 Python 程序直接调用：
+
+```python
+registry.execute("lookup_topic", {"topic": "Agent"})
+```
+
+但用户对话还不能让模型自动触发这个工具，因为 `AgentRuntime` 目前只解析文本回答，`OpenAICompatibleModel` 也还没有发送工具 schema。下一步要解决的是：模型如何表达工具调用，以及 Runtime 如何在模型响应和工具结果之间循环。
+
+### 过程 6：注册边界与执行错误修复
+
+回归审查发现，`ToolRegistry.register()` 之前只检查工具名称和重复注册，非法 schema 会被保存下来，直到执行时才可能因为 `properties` 不是对象而抛异常；未实现的 schema 类型也会被静默接受。
+
+修复后，注册阶段明确限制当前实现支持的 schema 子集：顶层必须是 `object`，属性类型只允许 `string`、`number` 和 `boolean`，并拒绝未实现的 schema 字段。执行阶段继续把额外参数、handler 异常和非文本返回值转换为结构化错误结果。
+
+新增回归测试覆盖非法顶层 schema、非法属性 schema、空工具名称、额外参数、handler 异常和非文本结果。工具注册失败发生在进入白名单之前，因此坏工具不会污染注册表。
 
 用户理解：HTTP 请求需要可以替换，而且不是每个 Agent 流程都必须依赖工具。
 
