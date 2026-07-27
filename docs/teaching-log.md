@@ -266,6 +266,70 @@ Runtime 负责决定程序如何安全地执行
 
 下一课将在当前项目中实现第一个本地工具和工具注册表，把这些概念变成可运行的代码。
 
+## 第二课：工具契约与工具注册表
+
+### 本节目标
+
+理解工具不是一段随意执行的函数，而是一个拥有名称、描述、参数契约、执行器和结果边界的受控能力。
+
+### 过程 1：工具是什么
+
+工具是 Agent 可以请求程序执行的外部能力。一个工具至少需要描述：
+
+```text
+name        工具名称
+description 工具用途
+parameters  参数 schema
+handler     实际执行函数
+result      标准化结果或错误
+```
+
+例如课程项目可以提供一个本地 `lookup_topic` 工具：
+
+```json
+{
+  "name": "lookup_topic",
+  "description": "Look up a known concept from the course notes.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "topic": {"type": "string"}
+    },
+    "required": ["topic"]
+  }
+}
+```
+
+这里的 JSON 描述是工具契约。它告诉模型“可以请求什么”和“参数长什么样”，但不会让模型直接执行 Python 函数。
+
+### 过程 2：模型和工具的边界
+
+模型可能返回一个抽象的工具请求：
+
+```json
+{
+  "type": "tool_call",
+  "name": "lookup_topic",
+  "arguments": {"topic": "Agent"}
+}
+```
+
+这个请求是不可信输入。Runtime 必须先检查工具名称、参数 schema 和权限，再交给对应 handler。模型永远不应该直接获得 Python 函数、Shell 或文件系统的执行权。
+
+### 过程 3：工具注册表
+
+工具注册表可以看作受控映射：
+
+```text
+"lookup_topic" -> ToolDefinition -> lookup_topic handler
+```
+
+它集中负责注册工具、查询工具、拒绝未知工具和调用已验证的 handler。这样 Runtime 不需要把每个工具写死在主循环里，也能保持工具白名单清晰可见。
+
+### 当前问题
+
+为什么工具需要参数 schema，而不能只给模型一个工具名称和一段自然语言描述？
+
 用户理解：HTTP 请求需要可以替换，而且不是每个 Agent 流程都必须依赖工具。
 
 教师补充：前半句正确。`ModelClient` 把模型供应商和 HTTP 细节隔离出来，方便切换真实模型、Mock 模型和测试替身。后半句需要区分：工具不是 HTTP 请求本身，而是 Agent 可以调用的外部能力，例如查询订单或读取数据库。简单问答可以没有工具，但需要工具执行任务时，Runtime 才会进入模型决策和程序执行之间的循环。
