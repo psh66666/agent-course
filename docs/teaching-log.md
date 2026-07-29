@@ -863,3 +863,103 @@ model.py: ToolCall / ModelResponse
   -> runtime.py: _serialize_tool_result
   -> Message(role="tool") 返回模型上下文
 ```
+
+### 教学纠偏：代码实现必须被完整讲解
+
+#### 学生反馈
+
+学生指出：代码已经被修改和提交，但教师只给了实现摘要，没有逐段讲解代码，也没有真正带着学生完成实践。
+
+#### 教师调整
+
+这次反馈成立。代码实践不等于代码已经写完；教学还必须包括：
+
+- 按模块解释新增代码和数据流
+- 运行一个可观察的完整实验
+- 说明测试如何验证每个边界
+- 给学生一个可以独立修改和验证的练习
+
+后续先完成这四步，再进入下一课或提交新的代码。
+
+### 实验结果：错误参数被模型处理
+
+实践示例把 `topic` 改为整数 `123` 后，输出为：
+
+```text
+ToolResult: ok=false, error_code=invalid_arguments
+最终回答：工具参数错误，topic 必须是字符串。
+```
+
+这证明参数错误没有直接抛出，而是经过 `ToolRegistry`、Runtime 和 `role="tool"` 消息回到模型，再由示例模型生成最终回答。期间还通过调整缩进修复了 `UnboundLocalError`：读取 `tool_result` 的代码必须位于 `role == "tool"` 分支内部。
+
+### 分步实践步骤：使用通用成功标志
+
+当前示例根据具体错误码判断：
+
+```python
+if tool_result["error_code"] == "invalid_arguments":
+```
+
+下一步练习是改为根据通用状态判断：
+
+```python
+if not tool_result["ok"]:
+```
+
+这样同一段逻辑也能处理未来的 `tool_not_found`、`tool_execution_error` 等失败类型。
+
+学生完成了这一行代码的泛化修改，运行输出保持不变。教师说明：输入仍然产生 `ok=False`，所以行为不应改变；变化在于错误判断不再绑定单一 `error_code`。
+
+学生随后将 `topic` 改回字符串 `"Agent"`，验证成功分支：`ToolResult.ok=True`，结果内容包含 Agent 课程说明，且不会进入错误处理。
+
+### 分步实践步骤：让模型读取成功结果
+
+当前示例的第二次模型响应仍然是预先写死的：
+
+```python
+ModelResponse(content="这是模型根据工具结果生成的最终回答。")
+```
+
+下一步让 `DemoModel.complete()` 在 `role="tool"` 分支中读取成功结果：错误时返回错误说明，成功时返回：
+
+```python
+return ModelResponse(
+    content=f"查询结果：{tool_result['content']}"
+)
+```
+
+这样可以证明模型确实消费了工具结果，而不是只完成了 Runtime 的消息传递。
+
+### 分步实践约定
+
+学生进一步明确：实践任务不能一次布置一个大目标，而应由教师逐步带领；每一步都要提供具体代码、运行验证和解释，确认当前步骤后再进入下一步。
+
+#### 实践步骤 1：补充非法参数回传测试
+
+新增 `test_invalid_arguments_result_is_returned_to_model`：让脚本模型先请求 `lookup_topic`，但传入数字类型的 `topic`，再返回最终文本。测试检查第二次模型看到的 `role="tool"` 消息包含 `invalid_arguments`。
+
+该测试直接通过，原因是当前生产代码已经由 `ToolRegistry` 生成结构化错误，并由 Runtime 回传给模型。这一步的价值是把已有行为固定成回归测试，没有新增生产逻辑。
+
+### 代码实践讲解与可观察实验
+
+教师补充讲解了本轮代码，而不是只报告实现结果。
+
+#### 实验模型
+
+使用离线 `DemoModel` 固定返回两次响应：第一次返回 `ToolCall("lookup_topic", {"topic": "Agent"})`，第二次返回最终文本。实验结果：
+
+```text
+answer: 这是最终回答。
+call_1: system -> user
+call_2: system -> user -> tool(lookup_topic)
+```
+
+这说明 Runtime 没有把工具请求当成用户答案，而是执行工具并把结果加入下一次模型上下文。
+
+#### 实验中发现的观察问题
+
+最初的 `ScriptedModel` 直接保存传入的 `messages` 列表。Runtime 后续向同一个列表追加 `tool` 消息，导致测试回看第一次调用时也看到了第二次的消息。根因是可变列表引用别名，不是 Runtime 的调用顺序错误。
+
+先增加回归断言，要求第一次调用最后一条消息必须是 `user`；测试随后失败。最小修复是记录 `list(messages)` 快照。修复后实验准确显示两次调用的消息差异，完整 Runtime 行为没有改变。
+
+这说明测试替身也必须尊重调用边界：如果测试需要观察历史输入，就应该保存快照，而不是保存会被后续流程修改的对象引用。

@@ -30,7 +30,7 @@ class ScriptedModel:
         self.calls: list[list[Message]] = []
 
     def complete(self, messages: list[Message]) -> ModelResponse:
-        self.calls.append(messages)
+        self.calls.append(list(messages))
         return self._responses.pop(0)
 
 
@@ -194,6 +194,7 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(answer, "Here is the course explanation.")
         self.assertEqual(len(model.calls), 2)
+        self.assertEqual(model.calls[0][-1].role, "user")
         tool_message = model.calls[1][-1]
         self.assertEqual(tool_message.role, "tool")
         self.assertEqual(tool_message.name, "lookup_topic")
@@ -213,6 +214,26 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(answer, "I cannot use that tool.")
         self.assertIn("tool_not_found", model.calls[1][-1].content)
+
+    def test_invalid_arguments_result_is_returned_to_model(self) -> None:
+        model = ScriptedModel(
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup_topic",
+                    arguments={"topic": 123},
+                    call_id="call-1",
+                )
+            ),
+            ModelResponse(content="The tool request had invalid arguments."),
+        )
+        agent = Agent(model=model, tool_registry=build_course_registry())
+
+        answer = agent.respond("Look up a topic")
+
+        self.assertEqual(answer, "The tool request had invalid arguments.")
+        tool_result = model.calls[1][-1]
+        self.assertEqual(tool_result.role, "tool")
+        self.assertIn("invalid_arguments", tool_result.content)
 
     def test_runtime_stops_after_maximum_tool_steps(self) -> None:
         model = ScriptedModel(
