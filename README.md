@@ -28,7 +28,7 @@
 PYTHONPATH=src python3 -c 'from agent_course.course_tools import build_course_registry; print(build_course_registry().execute("lookup_topic", {"topic": "Agent"}))'
 ```
 
-模型自动选择工具和 Agent 工具循环将在后续课程接入。
+本地 Mock 已支持结构化工具调用循环；真实模型的供应商工具协议将在后续课程接入。
 
 运行测试：
 

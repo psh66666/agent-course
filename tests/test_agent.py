@@ -3,8 +3,14 @@ import unittest
 from typing import Any
 
 from agent_course.agent import Agent
+from agent_course.course_tools import build_course_registry
 from agent_course.mock_model import MockModel
-from agent_course.model import Message, ModelClientError, ModelResponse
+from agent_course.model import (
+    Message,
+    ModelClientError,
+    ModelResponse,
+    ToolCall,
+)
 from agent_course.openai_compatible import OpenAICompatibleModel
 from agent_course.runtime import TraceEvent, TraceRecorder
 
@@ -16,6 +22,16 @@ class RecordingModel:
     def complete(self, messages: list[Message]) -> ModelResponse:
         self.messages = messages
         return ModelResponse(content="recorded answer")
+
+
+class ScriptedModel:
+    def __init__(self, *responses: ModelResponse) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[Message]] = []
+
+    def complete(self, messages: list[Message]) -> ModelResponse:
+        self.calls.append(messages)
+        return self._responses.pop(0)
 
 
 class FakeResponse:
@@ -160,6 +176,59 @@ class AgentTests(unittest.TestCase):
                 TraceEvent(kind="model.response", detail="content_length=15"),
             ),
         )
+
+    def test_runtime_executes_tool_and_returns_follow_up_answer(self) -> None:
+        model = ScriptedModel(
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup_topic",
+                    arguments={"topic": "Agent"},
+                    call_id="call-1",
+                )
+            ),
+            ModelResponse(content="Here is the course explanation."),
+        )
+        agent = Agent(model=model, tool_registry=build_course_registry())
+
+        answer = agent.respond("What is an agent?")
+
+        self.assertEqual(answer, "Here is the course explanation.")
+        self.assertEqual(len(model.calls), 2)
+        tool_message = model.calls[1][-1]
+        self.assertEqual(tool_message.role, "tool")
+        self.assertEqual(tool_message.name, "lookup_topic")
+        self.assertEqual(tool_message.tool_call_id, "call-1")
+        self.assertIn("Agent 是由模型", tool_message.content)
+
+    def test_unknown_tool_result_is_returned_to_model(self) -> None:
+        model = ScriptedModel(
+            ModelResponse(
+                tool_call=ToolCall(name="missing", arguments={}, call_id="call-1")
+            ),
+            ModelResponse(content="I cannot use that tool."),
+        )
+        agent = Agent(model=model, tool_registry=build_course_registry())
+
+        answer = agent.respond("Do something")
+
+        self.assertEqual(answer, "I cannot use that tool.")
+        self.assertIn("tool_not_found", model.calls[1][-1].content)
+
+    def test_runtime_stops_after_maximum_tool_steps(self) -> None:
+        model = ScriptedModel(
+            ModelResponse(tool_call=ToolCall(name="missing", arguments={})),
+            ModelResponse(tool_call=ToolCall(name="missing", arguments={})),
+        )
+        agent = Agent(
+            model=model,
+            tool_registry=build_course_registry(),
+            max_steps=2,
+        )
+
+        answer = agent.respond("Do something")
+
+        self.assertIn("maximum tool steps", answer)
+        self.assertEqual(len(model.calls), 2)
 
 
 if __name__ == "__main__":

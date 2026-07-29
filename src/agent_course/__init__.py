@@ -1,7 +1,7 @@
 """Small, teachable building blocks for an agent runtime."""
 
 from .agent import Agent
-from .model import Message, ModelClient, ModelClientError, ModelResponse
+from .model import Message, ModelClient, ModelClientError, ModelResponse, ToolCall
 
 __all__ = [
     "Agent",
@@ -9,4 +9,5 @@ __all__ = [
     "ModelClient",
     "ModelClientError",
     "ModelResponse",
+    "ToolCall",
 ]

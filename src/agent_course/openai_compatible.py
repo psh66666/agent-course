@@ -35,7 +35,7 @@ class OpenAICompatibleModel:
         payload = {
             "model": self._model_name,
             "messages": [
-                {"role": message.role, "content": message.content}
+                _serialize_message(message)
                 for message in messages
             ],
         }
@@ -75,3 +75,12 @@ class OpenAICompatibleModel:
         if not isinstance(content, str):
             raise ModelClientError("model response content must be text")
         return ModelResponse(content=content)
+
+
+def _serialize_message(message: Message) -> dict[str, str]:
+    payload = {"role": message.role, "content": message.content}
+    if message.name is not None:
+        payload["name"] = message.name
+    if message.tool_call_id is not None:
+        payload["tool_call_id"] = message.tool_call_id
+    return payload
