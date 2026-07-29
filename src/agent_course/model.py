@@ -1,6 +1,8 @@
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
+
+from .tools import ToolDefinition
 
 
 @dataclass(frozen=True)
@@ -33,5 +35,10 @@ class ModelClientError(RuntimeError):
 
 
 class ModelClient(Protocol):
-    def complete(self, messages: Sequence[Message]) -> ModelResponse:
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[ToolDefinition] = (),
+    ) -> ModelResponse:
         """Generate one assistant response for the supplied conversation."""

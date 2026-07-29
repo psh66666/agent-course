@@ -52,10 +52,15 @@ class AgentRuntime:
             Message(role="system", content=self._system_prompt),
             Message(role="user", content=user_input),
         ]
+        tools = (
+            self._tool_registry.definitions
+            if self._tool_registry is not None
+            else ()
+        )
         for _step in range(self._max_steps):
             if self._recorder is not None:
                 self._recorder.record("model.request", f"messages={len(messages)}")
-            response = self._model.complete(messages)
+            response = self._model.complete(messages, tools=tools)
 
             if response.content is not None:
                 if self._recorder is not None:

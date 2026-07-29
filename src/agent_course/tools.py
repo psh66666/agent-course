@@ -34,6 +34,10 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolDefinition] = {}
 
+    @property
+    def definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(self._tools.values())
+
     def register(self, tool: ToolDefinition) -> None:
         if not isinstance(tool.name, str) or not tool.name.strip():
             raise ValueError("tool name must not be empty")

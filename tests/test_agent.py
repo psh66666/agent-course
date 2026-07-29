@@ -13,14 +13,34 @@ from agent_course.model import (
 )
 from agent_course.openai_compatible import OpenAICompatibleModel
 from agent_course.runtime import TraceEvent, TraceRecorder
+from agent_course.tools import ToolDefinition
 
 
 class RecordingModel:
     def __init__(self) -> None:
         self.messages: list[Message] = []
 
-    def complete(self, messages: list[Message]) -> ModelResponse:
+    def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: tuple[ToolDefinition, ...] = (),
+    ) -> ModelResponse:
         self.messages = messages
+        return ModelResponse(content="recorded answer")
+
+
+class ToolRecordingModel:
+    def __init__(self) -> None:
+        self.tools: tuple[ToolDefinition, ...] = ()
+
+    def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: tuple[ToolDefinition, ...] = (),
+    ) -> ModelResponse:
+        self.tools = tools
         return ModelResponse(content="recorded answer")
 
 
@@ -29,7 +49,12 @@ class ScriptedModel:
         self._responses = list(responses)
         self.calls: list[list[Message]] = []
 
-    def complete(self, messages: list[Message]) -> ModelResponse:
+    def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: tuple[ToolDefinition, ...] = (),
+    ) -> ModelResponse:
         self.calls.append(list(messages))
         return self._responses.pop(0)
 
@@ -65,6 +90,83 @@ class RawFakeResponse:
 
 
 class OpenAICompatibleClientTests(unittest.TestCase):
+    def test_invalid_tool_call_arguments_are_rejected(self) -> None:
+        def fake_urlopen(_request: Any, timeout: int) -> FakeResponse:
+            return FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "function": {
+                                            "name": "lookup_topic",
+                                           "arguments": "not-json",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+
+        client = OpenAICompatibleModel(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            model_name="demo-model",
+            urlopen=fake_urlopen,
+        )
+
+        with self.assertRaises(ModelClientError):
+            client.complete([Message(role="user", content="hello")])
+
+    def test_complete_parses_tool_call_response(self) -> None:
+        def fake_urlopen(_request: Any, timeout: int) -> FakeResponse:
+            return FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "function": {
+                                            "name": "lookup_topic",
+                                            "arguments": json.dumps(
+                                                {"topic": "Agent"}
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+
+        client = OpenAICompatibleModel(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            model_name="demo-model",
+            urlopen=fake_urlopen,
+        )
+
+        response = client.complete([Message(role="user", content="hello")])
+
+        self.assertIsNone(response.content)
+        self.assertEqual(
+            response.tool_call,
+            ToolCall(
+                name="lookup_topic",
+                arguments={"topic": "Agent"},
+                call_id="call-1",
+            ),
+        )
+
     def test_complete_sends_messages_and_returns_text(self) -> None:
         requests: list[tuple[str, dict[str, str], dict[str, Any], int]] = []
 
@@ -99,6 +201,7 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(payload["model"], "demo-model")
         self.assertEqual(payload["messages"], [{"role": "user", "content": "hello"}])
         self.assertEqual(timeout, 7)
+        self.assertNotIn("tools", payload)
 
     def test_non_success_status_is_rejected(self) -> None:
         def fake_urlopen(_request: Any, timeout: int) -> FakeResponse:
@@ -138,7 +241,55 @@ class OpenAICompatibleClientTests(unittest.TestCase):
 
         with self.assertRaises(ModelClientError):
             client.complete([Message(role="user", content="hello")])
+    def test_complete_sends_tool_definitions(self) -> None:
+        requests: list[dict[str, Any]] = []
 
+        def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+            requests.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse(
+                {"choices": [{"message": {"content": "remote answer"}}]}
+            )
+
+        client = OpenAICompatibleModel(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            model_name="demo-model",
+            urlopen=fake_urlopen,
+        )
+        tool = ToolDefinition(
+            name="lookup_topic",
+            description="Look up a course topic.",
+            parameters={
+                "type": "object",
+                "properties": {"topic": {"type": "string"}},
+                "required": ["topic"],
+            },
+            handler=lambda _arguments: "not used",
+        )
+
+        response = client.complete(
+            [Message(role="user", content="hello")],
+            tools=[tool],
+        )
+
+        self.assertEqual(response.content, "remote answer")
+        self.assertEqual(
+            requests[0]["tools"],
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_topic",
+                        "description": "Look up a course topic.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"topic": {"type": "string"}},
+                            "required": ["topic"],
+                        },
+                    },
+                }
+            ],
+        )
 
 class AgentTests(unittest.TestCase):
     def test_runtime_passes_system_and_user_messages_to_model(self) -> None:
@@ -154,6 +305,20 @@ class AgentTests(unittest.TestCase):
                 Message(role="system", content="You are a teacher."),
                 Message(role="user", content="Explain an agent."),
             ],
+        )
+
+    def test_runtime_passes_registered_tools_to_model(self) -> None:
+        model = ToolRecordingModel()
+        agent = Agent(
+            model=model,
+            tool_registry=build_course_registry(),
+        )
+
+        agent.respond("hello")
+
+        self.assertEqual(
+            [tool.name for tool in model.tools],
+            ["lookup_topic"],
         )
 
     def test_mock_model_works_without_network(self) -> None:

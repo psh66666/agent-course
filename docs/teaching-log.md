@@ -930,6 +930,221 @@ return ModelResponse(
 
 这样可以证明模型确实消费了工具结果，而不是只完成了 Runtime 的消息传递。
 
+### 第三课结课
+
+学生完成了本地工具循环的完整实践：正常工具调用、参数错误、结构化错误回传和成功结果消费。完整测试达到 27 个，正式改动提交为 `26400a9` 并推送到 GitHub。`examples/` 是学生亲手创建的本地实践目录，暂不纳入正式提交。
+
+## 第四课：真实模型的工具协议
+
+### 本节目标
+
+理解本地 `ToolCall` 如何与真实模型供应商的 JSON 协议连接起来，并明确 Provider Adapter、Runtime 和 ToolRegistry 的职责边界。
+
+### 第三课留下的边界
+
+第三课的 `ScriptedModel` 可以直接构造 Python 对象：
+
+```python
+ModelResponse(
+    tool_call=ToolCall(
+        name="lookup_topic",
+        arguments={"topic": "Agent"},
+    )
+)
+```
+
+真实模型不会直接返回 Python 对象，而是通过 HTTP 返回 JSON。模型供应商通常会在响应中表达类似的信息：
+
+```json
+{
+  "message": {
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call-1",
+        "function": {
+          "name": "lookup_topic",
+          "arguments": "{\"topic\": \"Agent\"}"
+        }
+      }
+    ]
+  }
+}
+```
+
+这里的 `arguments` 甚至可能是 JSON 字符串，而不是已经解析好的对象。Provider Adapter 需要把供应商格式转换成内部 `ToolCall`；Runtime 不应该知道供应商字段名和 HTTP 响应细节。
+
+### 四层职责
+
+```text
+OpenAICompatibleModel
+  -> 发送工具定义，解析供应商 JSON
+  -> 转换为内部 ModelResponse / ToolCall
+
+AgentRuntime
+  -> 控制模型、工具和结果之间的有界循环
+
+ToolRegistry
+  -> 校验工具名称、参数 schema 和执行边界
+
+具体 handler
+  -> 执行实际业务能力
+```
+
+### 重要安全边界
+
+真实模型返回的 `tool_calls` 仍然是不可信输入。Adapter 负责解析格式，不能因为 JSON 能解析就认为请求合法；Runtime 和 Registry 仍然必须执行白名单、schema、权限、确认和最大步数检查。
+
+### 集中检查问题
+
+1. 为什么不能让 `OpenAICompatibleModel` 直接调用 `ToolRegistry`，而要把工具调用交给 Runtime？
+2. 如果供应商返回的 `arguments` 不是合法 JSON，应该在哪一层处理？应该如何反馈？
+3. 为什么“供应商 JSON 解析成功”仍然不代表工具可以执行？
+
+### 集中检查结果：真实模型协议的职责边界
+
+#### 学生回答
+
+1. “因为 `OpenAICompatibleModel` 本质上还是模型返回的内容，不可信。”
+2. “应该在 `ToolRegistry` 处理。”
+3. “还是需要判断权限问题。”
+
+#### 教师反馈
+
+第 3 点正确，但还需要补充白名单、schema、业务规则和用户确认。第 1、2 点需要区分“谁不可信”和“哪一层负责什么”：
+
+- 模型返回的 tool-call 数据是不可信输入，但 `OpenAICompatibleModel` 是供应商协议适配器，不是模型本身。
+- `OpenAICompatibleModel` 负责 HTTP、供应商 JSON 解析和内部 `ToolCall` 转换，不应该直接调用 `ToolRegistry`。
+- `ToolRegistry` 接收已经解析出的工具名称和参数对象，再负责白名单、schema 和执行边界。
+- 如果 `arguments` 不是合法 JSON，首先应由适配层发现并转换成结构化的无效工具请求；Runtime 决定是否把错误反馈给模型或结束流程。
+
+正确的数据流是：
+
+```text
+供应商 JSON
+  -> Adapter 解析和归一化
+  -> 内部 ToolCall
+  -> Runtime 编排
+  -> ToolRegistry 校验和执行
+```
+
+#### 理论阶段结论
+
+供应商协议解析、Runtime 编排和工具安全校验是三个不同职责，不能因为它们都处理“工具调用”就合并到一个模块。
+
+### 第四课代码实践：第一步
+
+先增加一个测试，固定供应商返回 `tool_calls` 时，客户端应该转换出内部 `ToolCall`。当前生产代码只支持文本响应，因此这个测试应先红灯；下一步再实现最小解析逻辑。
+
+### 第四课代码实践：解析供应商 tool call
+
+#### 红灯与实现
+
+学生先增加了供应商返回 `tool_calls` 的测试。原实现只接受文本 `content`，在 `content=None` 时抛出 `ModelClientError`，确认适配能力缺失。
+
+随后学生在 `OpenAICompatibleModel` 中补上：
+
+```text
+读取 HTTP response_body
+  -> 解析 choices[0].message
+  -> 检查 tool_calls
+  -> 解析 function.arguments JSON 字符串
+  -> 转换为内部 ToolCall
+```
+
+适配器当前明确限制一次响应只能包含一个 tool call，因为内部 `ModelResponse` 目前只有单个 `tool_call` 字段；遇到多个调用或错误形状会返回受控的 `ModelClientError`，不会静默丢弃调用。
+
+#### 错误边界测试
+
+学生增加了 `arguments="not-json"` 的测试。非法 arguments 在 Provider Adapter 层被拒绝，确认坏 JSON 不会继续传给 `ToolRegistry`。
+
+#### 验证
+
+完整测试返回 `Ran 29 tests` 和 `OK`，同时通过 `compileall` 与 `git diff --check`。过程中的缩进和缺失 `response_body` 问题属于手写实现时的结构错误，已通过错误信息定位并修复。
+
+### 第四课下一阶段：把工具定义发送给模型
+
+现在客户端能够解析模型发来的 tool call，但请求 payload 仍然没有工具清单。真实模型不知道 `lookup_topic` 的名称、描述和参数 schema，也就没有可靠依据主动调用它。
+
+请求方向需要公开工具的可调用部分：
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "lookup_topic",
+    "description": "Look up a known concept from the course notes.",
+    "parameters": {"type": "object"}
+  }
+}
+```
+
+`handler`、权限策略和其他内部实现不能发送给模型。它们只保留在本地 Registry，继续构成执行安全边界。
+
+### 集中检查问题：请求方向
+
+1. 为什么 HTTP 请求中的工具定义只应发送名称、描述和参数 schema，而不能发送 handler？
+2. Runtime 应该从哪里取得要发送给模型的工具清单，为什么不能让模型自行声明？
+3. 如果 Registry 没有任何工具，HTTP payload 应该包含空 `tools` 数组，还是省略 `tools` 字段？请说明你的选择和理由。
+
+### 集中检查结果：工具定义发送边界
+
+#### 学生回答
+
+1. “把 handler 发送进去模型就可以绕过审查直接调用工具了。”
+2. “Runtime 应该去工具定义里找。”
+3. “发送空 tools 数组，告诉模型没有工具可以调用。”
+
+#### 教师反馈
+
+第 2 点正确：Runtime 应从本地 `ToolRegistry` 的已注册工具中取得清单，模型不能声明新工具，否则模型可以尝试扩大系统能力。
+
+第 1 点需要补充：handler 是本地 Python 可执行对象，既不能序列化成供应商 JSON，也不应向模型暴露内部实现、权限规则或可执行入口。即使模型知道工具名称，它仍只能提出请求；Runtime 和 Registry 才能调用 handler。
+
+第 3 点的“告诉模型没有工具”意图正确，但当前课程选择在没有工具时省略 `tools` 字段。原因是没有工具协议时不需要发送该字段，且不同 OpenAI 兼容供应商对空数组的行为未必一致。模型仍可根据缺少工具定义得知本次请求没有可调用工具。
+
+#### 理论阶段结论
+
+HTTP 中只发送工具的公开契约：名称、描述和参数 schema。本地 Registry 是工具能力的唯一事实来源；handler、权限和业务规则永不离开本地进程。
+
+### 第四课代码实践：请求 payload 测试
+
+下一步先为“有 Registry 时发送 `tools`，无 Registry 时省略 `tools`”写测试，再修改 ModelClient/Runtime/Provider Adapter 的参数传递。
+
+### 第四课代码实践：发送工具定义
+
+学生先增加 Provider Adapter 的请求测试，确认有工具时 payload 包含公开的 `tools` schema，已有文本请求测试同时断言无工具时省略该字段。测试先因 `complete()` 不接受 `tools` 参数而红灯。
+
+学生随后扩展 `OpenAICompatibleModel.complete()`：接受可选 tools，只有工具非空时才在 payload 加入序列化的公开工具定义。序列化只包含 `name`、`description` 和 `parameters`，不包含 handler。
+
+完整测试达到 30 个且全部通过。当前完成的是 Adapter 的发送能力；Runtime 还没有把本地 Registry 的工具列表传给模型，这是下一步要连接的边界。
+
+### 第四课下一步：Runtime 传递工具清单
+
+下一条测试将验证：Agent 持有 Registry 时，模型客户端能收到 Registry 的已注册工具；没有 Registry 时，模型客户端应收到空清单，最终由 Adapter 省略 `tools` 字段。
+
+### 第四课代码实践：Runtime 传递工具清单
+
+学生先写入 Runtime 传递工具清单的测试。测试使用 `ToolRecordingModel` 记录 `complete()` 的 `tools` 参数；初始结果为空列表，确认 Runtime 尚未从 Registry 提取工具定义。
+
+随后完成接口传播：
+
+```text
+ToolRegistry.definitions
+  -> AgentRuntime.respond
+  -> ModelClient.complete(..., tools=...)
+  -> OpenAICompatibleModel.complete
+  -> HTTP payload.tools
+```
+
+`ToolRegistry.definitions` 返回注册工具的只读元组。Runtime 有 Registry 时传入该元组，没有 Registry 时传入空元组；Adapter 继续负责在空清单时省略 HTTP `tools` 字段。Mock 和测试替身也接受相同的可选参数，保证协议替换和离线测试不受影响。
+
+### 第四课结课
+
+本课实现了真实模型工具协议的双向适配：请求时发送公开工具契约，响应时解析供应商 `tool_calls` 并转换成内部 `ToolCall`。模型永远不获得 handler；Runtime 负责编排，Registry 保持执行安全边界。
+
+完整验证达到 31 个测试。学生的 `examples/` 实践目录保留在本地，不自动纳入课程提交。
+
 ### 分步实践约定
 
 学生进一步明确：实践任务不能一次布置一个大目标，而应由教师逐步带领；每一步都要提供具体代码、运行验证和解释，确认当前步骤后再进入下一步。
